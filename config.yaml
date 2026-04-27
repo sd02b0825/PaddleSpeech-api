@@ -1,0 +1,61 @@
+# PaddleSpeech API 配置文件
+
+# 启动配置
+server:
+  ip: "0.0.0.0"
+  port: 8091
+
+# mqtt配置
+mqtt_server:
+  base_url: "http://124.71.81.97:18007"
+  key: "ZhuoShang"
+
+
+# 音频分类检测服务配置
+cls_config:
+  ip: "127.0.0.1"
+  port: 8090
+  topk: 3
+  temp_dir: "/workspace/temp"
+  sample_rate: 16000
+  score: 0.35
+  labels:
+    Shout
+    Bellow
+    Whoop
+    Yell
+    Screaming
+    Crying
+    Sneeze
+    Slam
+    Knock
+    Explosion
+    Boom
+    Glass
+    Chink
+    Bang
+    Breaking
+    Flap
+    Squeal
+    Clatter
+    Plop
+    Cough
+
+
+
+# Sherpa TTS 配置
+sherpa_tts:
+  acoustic_model_dirname: "matcha-icefall-zh-en"
+  vocoder_filename: "vocos-16khz-univ.onnx"
+  num_threads: 2
+  speed: 1.0
+  sid: 0
+
+# TTS 输出目录
+tts_output_dir: "/workspace/PaddleSpeech-api/audiofile"
+
+# app服务器
+app_server:
+  base_url: "http://182.61.31.25:9001"
+
+
