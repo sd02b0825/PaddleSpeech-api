@@ -97,7 +97,7 @@ class CommandHttpClient:
 
     def send_alarm(
         self,
-        equipment_code: str,
+        macAddress: str,
         reminder: str,
         timeout: Optional[float] = None
     ) -> dict:
@@ -105,7 +105,7 @@ class CommandHttpClient:
         发送告警信息
 
         Args:
-            equipment_code: 设备验证码
+            macAddress: mac地址
             reminder: 提醒内容
             timeout: 请求超时时间（秒）
 
@@ -124,11 +124,11 @@ class CommandHttpClient:
             "key":"_1622a278e2322d2b21c47c007fa9d131"
         }
         payload = {
-            "equipmentCode": equipment_code,
+            "macAddress": macAddress,
             "reminder": reminder
         }
 
-        logger.info(f"发送告警信息到 {url}, equipmentCode={equipment_code}, reminder={reminder}")
+        logger.info(f"发送告警信息到 {url}, macAddress={macAddress}, reminder={reminder}")
 
         try:
             response = requests.post(
@@ -145,7 +145,7 @@ class CommandHttpClient:
 
     def send_message(
         self,
-        equipment_code: str,
+        macAddress: str,
         file_url: str,
         name: str,
         timeout: Optional[float] = None
@@ -154,7 +154,7 @@ class CommandHttpClient:
         发送留言信息
 
         Args:
-            equipment_code: 设备验证码
+            macAddress: mac地址
             file_url: 留言文件路径
             name: 声纹称呼
             timeout: 请求超时时间（秒）
@@ -174,12 +174,12 @@ class CommandHttpClient:
             "key":"_1622a278e2322d2b21c47c007fa9d131"
         }
         payload = {
-            "equipmentCode": equipment_code,
+            "macAddress": macAddress,
             "fileUrl": file_url,
             "name": name
         }
 
-        logger.info(f"发送留言信息到 {url}, equipmentCode={equipment_code}, fileUrl={file_url}, name={name}")
+        logger.info(f"发送留言信息到 {url}, macAddress={macAddress}, fileUrl={file_url}, name={name}")
 
         try:
             response = requests.post(

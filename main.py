@@ -417,11 +417,19 @@ async def upload_audio(request: AudioDataRequest):
                 for item in results:
                     prob = item.get('prob', 0)
                     class_name = item.get('class_name', '')
+                   
                     if prob > SCORE and class_name in LABELS:
-                        matched_classes.append(class_name)
+                        arrays=LABELS.split(" ")
+                        sub_matches = [label for label in arrays if class_name in label]
+                        logger.info(f"sub_matches: {sub_matches}")
+                        matche=sub_matches[0]
+                        if "-" in matche:
+                            matche=matche.split("-")[1]
+                        matched_classes.append(matche)
 
                 if matched_classes:
-                    text = ','.join(matched_classes)
+                    text =','.join(matched_classes)
+                    text=f"发现异常声音："+text
                     # 检查缓存，5分钟内相同client_id不重复调用
                     if not check_and_update_cache(request.client_id, text):
                         logger.info(f"client_id={request.client_id} 跳过重复调用")
@@ -430,9 +438,11 @@ async def upload_audio(request: AudioDataRequest):
                             code=request.client_id.split("@@@")[1]
                         else:
                             code=request.client_id
+                        if "_" in code:
+                            code=code.replace("_", ":")
                         # 从配置文件读取 HTTP 客户端参数
                         http_client = CommandHttpClient(base_url=APP_SERVER_BASE_URL,key="")
-                        result=http_client.send_alarm(equipment_code=code,reminder=text)
+                        result=http_client.send_alarm(macAddress=code,reminder=text)
                         logger.info(f"返回消息：{result}")
             success = True
         except Exception as e:
@@ -471,4 +481,4 @@ async def upload_audio(request: AudioDataRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=SERVER_IP, port=SERVER_PORT)
+    uvicorn.run(app, host=API_IP, port=API_PORT)

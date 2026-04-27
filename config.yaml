@@ -20,26 +20,21 @@ cls_config:
   sample_rate: 16000
   score: 0.35
   labels:
-    Shout
-    Bellow
-    Whoop
-    Yell
-    Screaming
-    Crying
-    Sneeze
-    Slam
-    Knock
-    Explosion
-    Boom
-    Glass
-    Chink
-    Bang
-    Breaking
-    Flap
-    Squeal
-    Clatter
-    Plop
-    Cough
+    Shout-呼喊
+    Bellow-咆哮
+    Yell-叫喊
+    Screaming-尖叫
+    Crying-哭泣
+    Sneeze-打喷嚏
+    Slam-猛击
+    Explosion-爆炸
+    Boom-轰鸣
+    Glass-玻璃破碎
+    Chink-碰撞声
+    Bang-爆裂声
+    Breaking-破碎声
+    Squeal-尖叫声
+    Cough-咳嗽
 
 
 
