@@ -181,9 +181,10 @@ class CommandHttpClient:
             "name": speaker
         }
 
-        logger.info(f"发送留言信息到 {url}, macAddress={macAddress}, fileUrl={file_url}, name={name}")
+        
 
         try:
+            logger.info(f"发送留言信息到 {url}, macAddress={macAddress}, fileUrl={file_url},familyName={receiver}, name={speaker}")
             response = requests.post(
                 url=url,
                 headers=headers,
