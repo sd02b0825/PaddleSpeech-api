@@ -172,7 +172,8 @@ def check_and_update_cache(client_id: str, text: str) -> bool:
         return True
 
 class TTSRequest(BaseModel):
-    name: str
+    receiver: str
+    speaker: str
     client_id: str
     text: str
     output_file: str
@@ -294,15 +295,19 @@ async def tts(request: TTSRequest):
             logger.info(f"开始发送消息到应用服务器: code={code}, url={file_url}")
             
             http_client = CommandHttpClient(base_url=APP_SERVER_BASE_URL,key="")
-            result = http_client.send_message(code, file_url, request.name)  # 需确保name已定义
+            result = http_client.send_message(code, file_url, request.receiver,request.speaker)  # 需确保name已定义
             
             logger.info(f"返回消息：{result}")
 
             # 校验发送结果
-            if result:
+            if "200" in result:
                 logger.info(f"消息发送成功")
             else:
-                logger.warning(f"消息发送失败,但继续处理")
+                logger.warning(f"消息发送失败:{result}")
+                return {
+                    "success": False,
+                    "message": f"消息发送失败:{result}"
+                }
             
         except Exception as e:
             logger.error(f"发送消息到应用服务器失败: {e}")
