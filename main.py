@@ -289,7 +289,7 @@ async def tts(request: TTSRequest):
                 code = request.client_id
             
             # 使用f-string拼接URL
-            file_url = f"http://{API_IP}:{API_PORT}/{output_path.lstrip('/')}"
+            file_url = f"http://{SERVER_IP}:{SERVER_PORT}/{output_path.lstrip('/')}"
             
             logger.info(f"开始发送消息到应用服务器: code={code}, url={file_url}")
             
@@ -481,4 +481,4 @@ async def upload_audio(request: AudioDataRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=API_IP, port=API_PORT)
+    uvicorn.run(app, host=SERVER_IP, port=SERVER_PORT)
