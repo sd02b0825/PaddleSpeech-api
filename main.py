@@ -319,11 +319,7 @@ async def tts(request: TTSRequest):
                 code = request.client_id
             
             # 使用f-string拼接URL
-<<<<<<< HEAD
             file_url = f"{SERVER_URL}/audiofile/{request.output_file}"
-=======
-            file_url = f"http://{SERVER_IP}:{SERVER_PORT}/{output_path.lstrip('/')}"
->>>>>>> 0edb3cc1c84a182319e73b5079ea1ada8b9d9222
             
             logger.info(f"开始发送消息到应用服务器: code={code}, url={file_url}")
             
@@ -333,11 +329,7 @@ async def tts(request: TTSRequest):
             logger.info(f"返回消息：{result}")
 
             # 校验发送结果
-<<<<<<< HEAD
             if isinstance(result, dict) and result.get('code') == 200:
-=======
-            if "200" in result:
->>>>>>> 0edb3cc1c84a182319e73b5079ea1ada8b9d9222
                 logger.info(f"消息发送成功")
             else:
                 logger.warning(f"消息发送失败:{result}")
