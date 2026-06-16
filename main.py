@@ -33,6 +33,15 @@ from paddlespeech.server.bin.paddlespeech_client import TTSClientExecutor
 from http_client import CommandHttpClient
 from audio_util import reduce_noise
 from opus_decoder import OpusDecoder
+from alarm_confirm import (
+    load_alarm_confirm_config,
+    match_chinese_label,
+    normalize_label_entries,
+    pick_sounds_desc,
+    start_alarm_confirm,
+    handle_alarm_response,
+    has_client_pending,
+)
 
 # 初始化 logger
 logger = logging.getLogger(__name__)
@@ -59,6 +68,7 @@ app = FastAPI(
 # 启动配置
 SERVER_PORT = CONFIG.get("server", {}).get("port", 8091) if CONFIG else 8091
 SERVER_IP = CONFIG.get("server", {}).get("ip", "0.0.0.0") if CONFIG else "0.0.0.0"
+SERVER_URL = CONFIG.get("server", {}).get("url", "http://124.71.81.97:8091") if CONFIG else "http://124.71.81.97:8091"
 
 # 从配置文件读取参数
 DEFAULT_SERVER_IP = CONFIG.get("cls_config", {}).get("ip", "127.0.0.1") if CONFIG else "127.0.0.1"
@@ -66,8 +76,11 @@ DEFAULT_PORT = CONFIG.get("cls_config", {}).get("port", 8090) if CONFIG else 809
 DEFAULT_TOPK = CONFIG.get("cls_config", {}).get("topk", 1) if CONFIG else 1
 TEMP_DIR = CONFIG.get("cls_config", {}).get("temp_dir", "/workspace/temp") if CONFIG else "/workspace/temp"
 SAMPLE_RATE = CONFIG.get("cls_config", {}).get("sample_rate", 16000) if CONFIG else 16000
-SCORE = CONFIG.get("cls_config", {}).get("score", 0.5) if CONFIG else 0.5
-LABELS = CONFIG.get("cls_config", {}).get("labels", []) if CONFIG else []
+SCORE = CONFIG.get("cls_config", {}).get("score", 0.4) if CONFIG else 0.4
+LABEL_ENTRIES = normalize_label_entries(
+    CONFIG.get("cls_config", {}).get("labels", []) if CONFIG else []
+)
+ALARM_CONFIRM_CFG = load_alarm_confirm_config(CONFIG)
 
 # mqtt配置
 MQTT_BASE_URL = CONFIG.get("mqtt_server", {}).get("base_url", "http://124.71.81.97:18007") if CONFIG else "http://124.71.81.97:18007"
@@ -172,7 +185,8 @@ def check_and_update_cache(client_id: str, text: str) -> bool:
         return True
 
 class TTSRequest(BaseModel):
-    name: str
+    receiver: str
+    speaker: str
     client_id: str
     text: str
     output_file: str
@@ -204,6 +218,21 @@ class TTSRequest(BaseModel):
             raise ValueError("output_file 只能是文件名，不能包含路径")
         return filename
 
+class AlarmResponseRequest(BaseModel):
+    """告警确认回调请求"""
+
+    session_id: str
+    confirmed: bool
+    text: str = ""
+
+    @field_validator("session_id")
+    @classmethod
+    def validate_session_id(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("session_id 不能为空")
+        return v.strip()
+
+
 class AudioDataRequest(BaseModel):
     """音频数据请求模型"""
 
@@ -234,7 +263,8 @@ async def root():
         "name": "PaddleSpeech 音频分类 API",
         "version": "1.0.0",
         "endpoints": {
-            "/upload/audio": "POST - 接收音频 base64 数据并保存为文件"
+            "/upload/audio": "POST - 接收音频 base64 数据并保存为文件",
+            "/alarm/response": "POST - 接收告警确认结果",
         }
     }
 
@@ -289,20 +319,24 @@ async def tts(request: TTSRequest):
                 code = request.client_id
             
             # 使用f-string拼接URL
-            file_url = f"http://{API_IP}:{API_PORT}/{output_path.lstrip('/')}"
+            file_url = f"{SERVER_URL}/audiofile/{request.output_file}"
             
             logger.info(f"开始发送消息到应用服务器: code={code}, url={file_url}")
             
             http_client = CommandHttpClient(base_url=APP_SERVER_BASE_URL,key="")
-            result = http_client.send_message(code, file_url, request.name)  # 需确保name已定义
+            result = http_client.send_message(code, file_url, request.receiver,request.speaker)  # 需确保name已定义
             
             logger.info(f"返回消息：{result}")
 
             # 校验发送结果
-            if result:
+            if isinstance(result, dict) and result.get('code') == 200:
                 logger.info(f"消息发送成功")
             else:
-                logger.warning(f"消息发送失败,但继续处理")
+                logger.warning(f"消息发送失败:{result}")
+                return {
+                    "success": False,
+                    "message": f"消息发送失败:{result}"
+                }
             
         except Exception as e:
             logger.error(f"发送消息到应用服务器失败: {e}")
@@ -326,6 +360,28 @@ async def tts(request: TTSRequest):
         }
 
 
+@app.post("/alarm/response")
+async def alarm_response(request: AlarmResponseRequest):
+    """接收 xiaozhi-server 转发的用户告警确认结果"""
+    action = handle_alarm_response(
+        session_id=request.session_id,
+        confirmed=request.confirmed,
+        app_server_base_url=APP_SERVER_BASE_URL,
+    )
+    if action == "session_not_found":
+        return {
+            "success": False,
+            "message": "会话不存在或已过期",
+            "data": {"session_id": request.session_id, "action": action},
+        }
+    message = "告警已发送" if action == "alarm_sent" else "告警已取消"
+    return {
+        "success": True,
+        "message": message,
+        "data": {"session_id": request.session_id, "action": action},
+    }
+
+
 @app.post("/upload/audio")
 async def upload_audio(request: AudioDataRequest):
     """
@@ -340,7 +396,7 @@ async def upload_audio(request: AudioDataRequest):
     ```
     """
     try:
-        if(not LABELS):
+        if not LABEL_ENTRIES:
             logger.info(f"labels为空")
             return {
                 "success": True,
@@ -413,37 +469,57 @@ async def upload_audio(request: AudioDataRequest):
                 results = res_data['result'].get('results', [])
                 logger.info(f"音频分类结果: {results}")
                 matched_classes = []
+                matched_en_classes = []
 
                 for item in results:
                     prob = item.get('prob', 0)
                     class_name = item.get('class_name', '')
-                   
-                    if prob > SCORE and class_name in LABELS:
-                        arrays=LABELS.split(" ")
-                        sub_matches = [label for label in arrays if class_name in label]
-                        logger.info(f"sub_matches: {sub_matches}")
-                        matche=sub_matches[0]
-                        if "-" in matche:
-                            matche=matche.split("-")[1]
-                        matched_classes.append(matche)
+                    cn_label = match_chinese_label(class_name, LABEL_ENTRIES)
+                    if prob > SCORE and cn_label:
+                        matched_classes.append(cn_label)
+                        matched_en_classes.append(class_name)
 
                 if matched_classes:
-                    text =','.join(matched_classes)
-                    text=f"发现异常声音："+text
-                    # 检查缓存，5分钟内相同client_id不重复调用
-                    if not check_and_update_cache(request.client_id, text):
+                    reminder = "发现异常声音：" + ",".join(matched_classes)
+                    # 检查缓存，5分钟内相同 client_id + text 不重复触发
+                    if not check_and_update_cache(request.client_id, reminder):
                         logger.info(f"client_id={request.client_id} 跳过重复调用")
+                    elif has_client_pending(request.client_id):
+                        logger.info(f"client_id={request.client_id} 待确认中，跳过")
                     else:
-                        if("@@@" in request.client_id):
-                            code=request.client_id.split("@@@")[1]
+                        if "@@@" in request.client_id:
+                            code = request.client_id.split("@@@")[1]
                         else:
-                            code=request.client_id
+                            code = request.client_id
                         if "_" in code:
-                            code=code.replace("_", ":")
-                        # 从配置文件读取 HTTP 客户端参数
-                        http_client = CommandHttpClient(base_url=APP_SERVER_BASE_URL,key="")
-                        result=http_client.send_alarm(macAddress=code,reminder=text)
-                        logger.info(f"返回消息：{result}")
+                            code = code.replace("_", ":")
+
+                        if ALARM_CONFIRM_CFG.enabled:
+                            sounds_desc = pick_sounds_desc(
+                                matched_classes, matched_en_classes
+                            )
+                            ok, session_id = start_alarm_confirm(
+                                client_id=request.client_id,
+                                mac_code=code,
+                                reminder=reminder,
+                                sounds_desc=sounds_desc,
+                                api_base_url=SERVER_URL.rstrip("/"),
+                                mqtt_base_url=MQTT_BASE_URL,
+                                mqtt_key=MQTT_KEY,
+                                app_server_base_url=APP_SERVER_BASE_URL,
+                                cfg=ALARM_CONFIRM_CFG,
+                            )
+                            logger.info(
+                                f"告警确认流程: ok={ok}, session_id={session_id}"
+                            )
+                        else:
+                            http_client = CommandHttpClient(
+                                base_url=APP_SERVER_BASE_URL, key=""
+                            )
+                            result = http_client.send_alarm(
+                                macAddress=code, reminder=reminder
+                            )
+                            logger.info(f"直接发送告警：{result}")
             success = True
         except Exception as e:
             logger.error(f"WAV转换失败: {e}")
@@ -481,4 +557,4 @@ async def upload_audio(request: AudioDataRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=API_IP, port=API_PORT)
+    uvicorn.run(app, host=SERVER_IP, port=SERVER_PORT)

@@ -3,11 +3,12 @@
 # 启动配置
 server:
   ip: "0.0.0.0"
+  url: "https://d7c08035556848ba91564b7f6c6d1512--8091.ap-shanghai2.cloudstudio.club"
   port: 8091
 
 # mqtt配置
 mqtt_server:
-  base_url: "http://124.71.81.97:18007"
+  base_url: "http://124.71.81.97:8007"
   key: "ZhuoShang"
 
 
@@ -18,7 +19,7 @@ cls_config:
   topk: 3
   temp_dir: "/workspace/temp"
   sample_rate: 16000
-  score: 0.35
+  score: 0.3
   labels:
     Shout-呼喊
     Bellow-咆哮
@@ -53,4 +54,12 @@ tts_output_dir: "/workspace/PaddleSpeech-api/audiofile"
 app_server:
   base_url: "http://182.61.31.25:9001"
 
+# 告警确认配置
+alarm_confirm:
+  enabled: true
+  timeout_seconds: 30
+  inquiry_template: "{sounds_desc}，您还好吗？需要我帮您通知一下家人吗？"
+  confirm_reply: "好的，我已经帮您通知家人了。"
+  cancel_reply: "好的，那我就不打扰了，您有需要随时叫我。"
+  fallback_direct_alarm: true
 

@@ -147,7 +147,8 @@ class CommandHttpClient:
         self,
         macAddress: str,
         file_url: str,
-        name: str,
+        receiver: str,
+        speaker: str,
         timeout: Optional[float] = None
     ) -> dict:
         """
@@ -176,12 +177,14 @@ class CommandHttpClient:
         payload = {
             "macAddress": macAddress,
             "fileUrl": file_url,
-            "name": name
+            "familyName": receiver,
+            "name": speaker
         }
 
-        logger.info(f"发送留言信息到 {url}, macAddress={macAddress}, fileUrl={file_url}, name={name}")
+        
 
         try:
+            logger.info(f"发送留言信息到 {url}, macAddress={macAddress}, fileUrl={file_url},familyName={receiver}, name={speaker}")
             response = requests.post(
                 url=url,
                 headers=headers,
