@@ -10,6 +10,7 @@ import uuid
 import subprocess
 from datetime import datetime
 import logging
+from logging.handlers import TimedRotatingFileHandler
 import numpy as np
 import noisereduce as nr
 from scipy import signal
@@ -45,6 +46,24 @@ from alarm_confirm import (
 
 # 初始化 logger
 logger = logging.getLogger(__name__)
+
+# 配置文件日志（每天自动分割，保留最近 30 天）
+_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(_log_dir, exist_ok=True)
+_log_file = os.path.join(_log_dir, "api.log")
+_file_handler = TimedRotatingFileHandler(
+    _log_file,
+    when="midnight",      # 每天午夜 0 点分割
+    interval=1,            # 每 1 天
+    backupCount=30,        # 保留最近 30 天的日志
+    encoding="utf-8",
+)
+_file_handler.suffix = "%Y-%m-%d.log"
+_file_handler.setFormatter(logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+))
+logger.addHandler(_file_handler)
+logger.setLevel(logging.DEBUG)
 
 # 加载配置文件
 def load_config():
@@ -441,6 +460,7 @@ async def upload_audio(request: AudioDataRequest):
         # 创建WAV文件头
         wav_buffer = io.BytesIO()
         success = False
+        results = []  # 初始化，防止未定义
         try:
             with wave.open(wav_buffer, "wb") as wav_file:
                 wav_file.setnchannels(1)  # 单声道
@@ -533,7 +553,8 @@ async def upload_audio(request: AudioDataRequest):
                 "success": True,
                 "message": "音频文件处理成功",
                 "data": {
-                    "client_id": request.client_id
+                    "client_id": request.client_id,
+                    "result": results
                 }
             }
         else:
