@@ -20,6 +20,7 @@ _client_pending: Dict[str, str] = {}
 
 # 多种声音命中时的优先级（英文 class_name）
 _SOUND_PRIORITY = [
+    "Distress",
     "Screaming",
     "Squeal",
     "Shout",
@@ -39,6 +40,7 @@ _SOUND_PRIORITY = [
 
 # 中文标签 -> 口语描述
 _CN_SOUND_DESC: Dict[str, str] = {
+    "求救": "好像有人在呼救",
     "呼喊": "好像有人在呼救",
     "叫喊": "好像有人在呼救",
     "咆哮": "好像有人在呼救",

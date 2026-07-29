@@ -43,6 +43,7 @@ from alarm_confirm import (
     handle_alarm_response,
     has_client_pending,
 )
+from sensevoice_asr import get_sensevoice_asr
 
 # 初始化 logger
 logger = logging.getLogger(__name__)
@@ -101,6 +102,14 @@ LABEL_ENTRIES = normalize_label_entries(
 )
 ALARM_CONFIRM_CFG = load_alarm_confirm_config(CONFIG)
 
+_SPEECH_DETECT = (CONFIG.get("speech_detect", {}) if CONFIG else {}) or {}
+SPEECH_DETECT_ENABLED = bool(_SPEECH_DETECT.get("enabled", True))
+SPEECH_LABELS = normalize_label_entries(_SPEECH_DETECT.get("speech_labels", []))
+DISTRESS_KEYWORDS = normalize_label_entries(
+    _SPEECH_DETECT.get("distress_keywords", [])
+)
+DISTRESS_LABEL = str(_SPEECH_DETECT.get("distress_label", "求救")).strip() or "求救"
+
 # mqtt配置
 MQTT_BASE_URL = CONFIG.get("mqtt_server", {}).get("base_url", "http://124.71.81.97:18007") if CONFIG else "http://124.71.81.97:18007"
 MQTT_KEY = CONFIG.get("mqtt_server", {}).get("key", "ZhuoShang") if CONFIG else "ZhuoShang"
@@ -122,6 +131,34 @@ APP_SERVER_BASE_URL =CONFIG.get("app_server", {}).get("base_url", "http://124.71
 
 # 挂载静态文件目录，允许通过 /audiofile/ 路径访问文件
 app.mount("/audiofile", StaticFiles(directory=TTS_OUTPUT_DIR), name="audiofile")
+
+
+def is_speech_label(class_name: str, speech_labels: list) -> bool:
+    """判断分类结果是否属于说话声标签（子串匹配）。"""
+    if not class_name or not speech_labels:
+        return False
+    return any(label in class_name or class_name in label for label in speech_labels)
+
+
+def contains_distress(text: str, keywords: list) -> bool:
+    """识别文本是否包含求救关键词（忽略空白）。"""
+    if not text or not keywords:
+        return False
+    compact = "".join(text.split())
+    return any(kw and kw in compact for kw in keywords)
+
+
+@app.on_event("startup")
+async def preload_sensevoice_asr():
+    """启动时预加载 SenseVoice，失败则降级（说话声 ASR 跳过）。"""
+    if not SPEECH_DETECT_ENABLED:
+        logger.info("说话声检测已关闭，跳过 SenseVoice ASR 预加载")
+        return
+    try:
+        get_sensevoice_asr(CONFIG)
+        logger.info("SenseVoice ASR 启动预加载完成")
+    except Exception as e:
+        logger.error(f"SenseVoice ASR 启动预加载失败，说话声求救检测将降级: {e}")
 
 
 def build_sherpa_tts():
@@ -498,6 +535,29 @@ async def upload_audio(request: AudioDataRequest):
                     if prob > SCORE and cn_label:
                         matched_classes.append(cn_label)
                         matched_en_classes.append(class_name)
+
+                # 说话声且不在 LABEL_ENTRIES：ASR 识别求救内容
+                need_asr = SPEECH_DETECT_ENABLED and any(
+                    item.get("prob", 0) > SCORE
+                    and is_speech_label(item.get("class_name", ""), SPEECH_LABELS)
+                    and not match_chinese_label(
+                        item.get("class_name", ""), LABEL_ENTRIES
+                    )
+                    for item in results
+                )
+                if need_asr:
+                    try:
+                        asr = get_sensevoice_asr(CONFIG)
+                        asr_text = asr.recognize(wav_path)
+                        logger.info(
+                            f"说话声 ASR 结果: client_id={request.client_id}, text={asr_text}"
+                        )
+                        if contains_distress(asr_text, DISTRESS_KEYWORDS):
+                            if DISTRESS_LABEL not in matched_classes:
+                                matched_classes.append(DISTRESS_LABEL)
+                                matched_en_classes.append("Distress")
+                    except Exception as e:
+                        logger.error(f"说话声 ASR 失败，跳过求救检测: {e}")
 
                 if matched_classes:
                     reminder = "发现异常声音：" + ",".join(matched_classes)

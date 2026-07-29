@@ -39,6 +39,31 @@ cls_config:
 
 
 
+# 说话声求救检测（分类为说话声且不在 labels 异常列表时走 ASR）
+speech_detect:
+  enabled: true  # false 时不启用说话声检测 / ASR 求救识别
+  speech_labels:
+    - Speech
+    - Male speech
+    - Female speech
+    - Child speech
+    - Conversation
+  distress_keywords:
+    - 救命
+    - 救我
+    - 救命啊
+    - 帮帮我
+    - 救人
+    - 快来人
+  distress_label: 求救
+
+# SenseVoice ASR 配置
+sensevoice_asr:
+  model_path: "/workspace/models/SenseVoiceSmall"  # 本地模型目录
+  device: "cpu"          # 或 cuda:0
+  language: "auto"       # zh / en / yue / ja / ko / auto
+  use_itn: true          # 标点与逆文本归一化
+
 # Sherpa TTS 配置
 sherpa_tts:
   acoustic_model_dirname: "matcha-icefall-zh-en"
