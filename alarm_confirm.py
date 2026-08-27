@@ -209,21 +209,45 @@ def start_alarm_confirm(
 ) -> Tuple[bool, Optional[str]]:
     """
     发起告警确认询问。成功返回 (True, session_id)，失败返回 (False, None)。
+    先持锁登记 pending，再发 MQTT，避免同 client 并发双触发。
     """
-    if has_client_pending(client_id):
-        logger.info(f"client_id={client_id} 已有待确认告警，跳过")
-        return False, None
+    import time
 
     session_id = uuid.uuid4().hex
     inquiry_text = build_inquiry_payload(
         session_id, api_base_url, sounds_desc, cfg.inquiry_template
     )
 
+    timer = Timer(
+        cfg.timeout_seconds,
+        _on_timeout,
+        args=(session_id, app_server_base_url),
+    )
+    pending = PendingAlarm(
+        session_id=session_id,
+        client_id=client_id,
+        mac_code=mac_code,
+        reminder=reminder,
+        created_at=time.time(),
+        timer=timer,
+    )
+
+    with _pending_lock:
+        existing_sid = _client_pending.get(client_id)
+        if existing_sid:
+            existing = _pending_alarms.get(existing_sid)
+            if existing is not None and existing.status == "pending":
+                logger.info(f"client_id={client_id} 已有待确认告警，跳过")
+                return False, None
+        _pending_alarms[session_id] = pending
+        _client_pending[client_id] = session_id
+
     try:
         mqtt_client = CommandHttpClient(base_url=mqtt_base_url, key=mqtt_key)
         mqtt_client.send_listen_command(client_id=client_id, text=inquiry_text)
     except Exception as e:
         logger.error(f"发送告警询问失败: client_id={client_id}, error={e}")
+        _cleanup_session(session_id)
         if cfg.fallback_direct_alarm:
             try:
                 _send_alarm(mac_code, reminder, app_server_base_url)
@@ -232,26 +256,6 @@ def start_alarm_confirm(
             except Exception as alarm_err:
                 logger.error(f"降级发送告警失败: {alarm_err}")
         return False, None
-
-    import time
-
-    pending = PendingAlarm(
-        session_id=session_id,
-        client_id=client_id,
-        mac_code=mac_code,
-        reminder=reminder,
-        created_at=time.time(),
-    )
-    timer = Timer(
-        cfg.timeout_seconds,
-        _on_timeout,
-        args=(session_id, app_server_base_url),
-    )
-    pending.timer = timer
-
-    with _pending_lock:
-        _pending_alarms[session_id] = pending
-        _client_pending[client_id] = session_id
 
     timer.start()
     logger.info(

@@ -5,6 +5,7 @@ server:
   ip: "0.0.0.0"
   url: "https://d7c08035556848ba91564b7f6c6d1512--8091.ap-shanghai2.cloudstudio.club"
   port: 8091
+  log_level: "INFO"  # DEBUG / INFO / WARNING / ERROR
 
 # mqtt配置
 mqtt_server:
@@ -61,7 +62,7 @@ speech_detect:
 sensevoice_asr:
   model_path: "/workspace/models/SenseVoiceSmall"  # 本地模型目录
   device: "cpu"          # 或 cuda:0
-  language: "auto"       # zh / en / yue / ja / ko / auto
+  language: "zh"       # zh / en / yue / ja / ko / auto
   use_itn: true          # 标点与逆文本归一化
 
 # Sherpa TTS 配置
@@ -82,7 +83,7 @@ app_server:
 # 告警确认配置
 alarm_confirm:
   enabled: true
-  timeout_seconds: 30
+  timeout_seconds: 60
   inquiry_template: "{sounds_desc}，您还好吗？需要我帮您通知一下家人吗？"
   confirm_reply: "好的，我已经帮您通知家人了。"
   cancel_reply: "好的，那我就不打扰了，您有需要随时叫我。"

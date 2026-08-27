@@ -2,71 +2,69 @@
 PaddleSpeech 音频分类 API
 基于 FastAPI 实现，提供音频分类检测接口
 """
+import asyncio
 import io
 import wave
 import os
-import base64
-import uuid
-import subprocess
-from datetime import datetime
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import numpy as np
-import noisereduce as nr
-from scipy import signal
-from typing import Optional
 import yaml
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-import time
-from threading import Lock
-import opuslib
+from pydantic import BaseModel, field_validator
 import sherpa_onnx
 
-# 缓存结构: {client_id: {"text": matched_text, "timestamp": time.time()}}
-_command_cache = {}
-_cache_lock = Lock()
-_CACHE_TTL = 300  # 5分钟缓存有效期（秒）
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, field_validator
-from paddlespeech.server.bin.paddlespeech_client import CLSClientExecutor
-from paddlespeech.server.bin.paddlespeech_client import TTSClientExecutor
+
+def _resolve_log_level() -> int:
+    """从 config.yaml 读取日志级别，默认 INFO（过滤 DEBUG）。"""
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        level_name = str((cfg.get("server", {}) or {}).get("log_level", "INFO")).upper()
+        return getattr(logging, level_name, logging.INFO)
+    except Exception:
+        return logging.INFO
+
+
+def setup_logging() -> None:
+    """配置 root logger，使各模块日志统一写入 logs/api.log。"""
+    log_level = _resolve_log_level()
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "api.log")
+    handler = TimedRotatingFileHandler(
+        log_file,
+        when="midnight",
+        interval=1,
+        backupCount=30,
+        encoding="utf-8",
+    )
+    handler.suffix = "%Y-%m-%d.log"
+    handler.setLevel(log_level)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    ))
+    root = logging.getLogger()
+    root.setLevel(log_level)
+    root.addHandler(handler)
+
+
+setup_logging()
+
 from http_client import CommandHttpClient
-from audio_util import reduce_noise
-from opus_decoder import OpusDecoder
 from alarm_confirm import (
     load_alarm_confirm_config,
-    match_chinese_label,
     normalize_label_entries,
-    pick_sounds_desc,
-    start_alarm_confirm,
     handle_alarm_response,
-    has_client_pending,
 )
 from sensevoice_asr import get_sensevoice_asr
+from audio_upload import RawAudioUpload, UploadAudioConfig, process_upload_audio
 
-# 初始化 logger
 logger = logging.getLogger(__name__)
 
-# 配置文件日志（每天自动分割，保留最近 30 天）
-_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-os.makedirs(_log_dir, exist_ok=True)
-_log_file = os.path.join(_log_dir, "api.log")
-_file_handler = TimedRotatingFileHandler(
-    _log_file,
-    when="midnight",      # 每天午夜 0 点分割
-    interval=1,            # 每 1 天
-    backupCount=30,        # 保留最近 30 天的日志
-    encoding="utf-8",
-)
-_file_handler.suffix = "%Y-%m-%d.log"
-_file_handler.setFormatter(logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-))
-logger.addHandler(_file_handler)
-logger.setLevel(logging.DEBUG)
 
-# 加载配置文件
 def load_config():
     """加载 YAML 配置文件"""
     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
@@ -76,6 +74,7 @@ def load_config():
     except Exception as e:
         logger.warning(f"加载配置文件失败，使用默认配置: {e}")
         return None
+
 
 # 全局配置
 CONFIG = load_config()
@@ -114,8 +113,6 @@ DISTRESS_LABEL = str(_SPEECH_DETECT.get("distress_label", "求救")).strip() or 
 MQTT_BASE_URL = CONFIG.get("mqtt_server", {}).get("base_url", "http://124.71.81.97:18007") if CONFIG else "http://124.71.81.97:18007"
 MQTT_KEY = CONFIG.get("mqtt_server", {}).get("key", "ZhuoShang") if CONFIG else "ZhuoShang"
 
-
-
 # Sherpa TTS 配置
 SHERPA_MODEL_DIR = "/workspace/xiaozhi-esp32-server/main/xiaozhi-server/models/sherpa-tts"
 SHERPA_ACOUSTIC_DIRNAME = CONFIG.get("sherpa_tts", {}).get("acoustic_model_dirname", "matcha-icefall-zh-en") if CONFIG else "matcha-icefall-zh-en"
@@ -126,26 +123,30 @@ SHERPA_SID = int(CONFIG.get("sherpa_tts", {}).get("sid", 0)) if CONFIG else 0
 TTS_OUTPUT_DIR = CONFIG.get("tts_output_dir", "/workspace/PaddleSpeech-api/audiofile") if CONFIG else "/workspace/PaddleSpeech-api/audiofile"
 
 # app_server 配置
-APP_SERVER_BASE_URL =CONFIG.get("app_server", {}).get("base_url", "http://124.71.81.97:18007") if CONFIG else "http://124.71.81.97:18007"
+APP_SERVER_BASE_URL = CONFIG.get("app_server", {}).get("base_url", "http://124.71.81.97:18007") if CONFIG else "http://124.71.81.97:18007"
 
+UPLOAD_CFG = UploadAudioConfig(
+    cls_server_ip=DEFAULT_SERVER_IP,
+    cls_port=DEFAULT_PORT,
+    cls_topk=DEFAULT_TOPK,
+    temp_dir=TEMP_DIR,
+    sample_rate=SAMPLE_RATE,
+    score=SCORE,
+    label_entries=LABEL_ENTRIES,
+    speech_detect_enabled=SPEECH_DETECT_ENABLED,
+    speech_labels=SPEECH_LABELS,
+    distress_keywords=DISTRESS_KEYWORDS,
+    distress_label=DISTRESS_LABEL,
+    sensevoice_config=CONFIG,
+    mqtt_base_url=MQTT_BASE_URL,
+    mqtt_key=MQTT_KEY,
+    app_server_base_url=APP_SERVER_BASE_URL,
+    server_url=SERVER_URL,
+    alarm_confirm_cfg=ALARM_CONFIRM_CFG,
+)
 
 # 挂载静态文件目录，允许通过 /audiofile/ 路径访问文件
 app.mount("/audiofile", StaticFiles(directory=TTS_OUTPUT_DIR), name="audiofile")
-
-
-def is_speech_label(class_name: str, speech_labels: list) -> bool:
-    """判断分类结果是否属于说话声标签（子串匹配）。"""
-    if not class_name or not speech_labels:
-        return False
-    return any(label in class_name or class_name in label for label in speech_labels)
-
-
-def contains_distress(text: str, keywords: list) -> bool:
-    """识别文本是否包含求救关键词（忽略空白）。"""
-    if not text or not keywords:
-        return False
-    compact = "".join(text.split())
-    return any(kw and kw in compact for kw in keywords)
 
 
 @app.on_event("startup")
@@ -207,39 +208,6 @@ def get_sherpa_tts():
     return _sherpa_tts
 
 
-def check_and_update_cache(client_id: str, text: str) -> bool:
-    """
-    检查缓存并更新缓存记录
-    :param client_id: 客户端ID，作为缓存key
-    :param text: 匹配的分类文本
-    :return: True表示需要调用send_listen_command，False表示命中缓存且text相同跳过调用
-    """
-    current_time = time.time()
-    with _cache_lock:
-        # 检查缓存是否存在且未过期
-        if client_id in _command_cache:
-            cache_entry = _command_cache[client_id]
-            if current_time - cache_entry["timestamp"] < _CACHE_TTL:
-                # 缓存命中且未过期，判断text是否相同
-                if cache_entry["text"] == text:
-                    logger.info(f"client_id={client_id} 命中缓存(text相同)，跳过调用")
-                    return False
-                else:
-                    logger.info(f"client_id={client_id} 缓存存在但text不同({cache_entry['text']} -> {text})，允许调用")
-        # 更新缓存
-        _command_cache[client_id] = {
-            "text": text,
-            "timestamp": current_time
-        }
-        # 清理过期缓存（超过缓存有效期2倍的记录）
-        expired_keys = [
-            k for k, v in _command_cache.items()
-            if current_time - v["timestamp"] >= _CACHE_TTL * 2
-        ]
-        for k in expired_keys:
-            del _command_cache[k]
-        return True
-
 class TTSRequest(BaseModel):
     receiver: str
     speaker: str
@@ -274,6 +242,7 @@ class TTSRequest(BaseModel):
             raise ValueError("output_file 只能是文件名，不能包含路径")
         return filename
 
+
 class AlarmResponseRequest(BaseModel):
     """告警确认回调请求"""
 
@@ -289,29 +258,6 @@ class AlarmResponseRequest(BaseModel):
         return v.strip()
 
 
-class AudioDataRequest(BaseModel):
-    """音频数据请求模型"""
-
-    client_id: str
-    data: str
-
-    @field_validator('client_id')
-    @classmethod
-    def validate_client_id(cls, v: str) -> str:
-        """验证 client_id 参数"""
-        if not v or not v.strip():
-            raise ValueError("client_id 不能为空")
-        return v
-
-    @field_validator('data')
-    @classmethod
-    def validate_data(cls, v: str) -> str:
-        """验证 data 参数"""
-        if not v or not v.strip():
-            raise ValueError("data 不能为空")
-        return v
-
-
 @app.get("/")
 async def root():
     """根路径，返回 API 信息"""
@@ -319,10 +265,11 @@ async def root():
         "name": "PaddleSpeech 音频分类 API",
         "version": "1.0.0",
         "endpoints": {
-            "/upload/audio": "POST - 接收音频 base64 数据并保存为文件",
+            "/upload/audio": "POST - 接收硬件原始 PCM（binary body + headers）",
             "/alarm/response": "POST - 接收告警确认结果",
         }
     }
+
 
 @app.post("/tts")
 async def tts(request: TTSRequest):
@@ -367,24 +314,22 @@ async def tts(request: TTSRequest):
         duration = len(int_samples) / sample_rate
 
         logger.info(f"TTS合成完成: {output_path}, 时长: {duration:.2f}s")
-      
+
         try:
             if "@@@" in request.client_id:
                 code = request.client_id.split("@@@")[1]
             else:
                 code = request.client_id
-            
-            # 使用f-string拼接URL
+
             file_url = f"{SERVER_URL}/audiofile/{request.output_file}"
-            
+
             logger.info(f"开始发送消息到应用服务器: code={code}, url={file_url}")
-            
-            http_client = CommandHttpClient(base_url=APP_SERVER_BASE_URL,key="")
-            result = http_client.send_message(code, file_url, request.receiver,request.speaker)  # 需确保name已定义
-            
+
+            http_client = CommandHttpClient(base_url=APP_SERVER_BASE_URL, key="")
+            result = http_client.send_message(code, file_url, request.receiver, request.speaker)
+
             logger.info(f"返回消息：{result}")
 
-            # 校验发送结果
             if isinstance(result, dict) and result.get('code') == 200:
                 logger.info(f"消息发送成功")
             else:
@@ -393,7 +338,7 @@ async def tts(request: TTSRequest):
                     "success": False,
                     "message": f"消息发送失败:{result}"
                 }
-            
+
         except Exception as e:
             logger.error(f"发送消息到应用服务器失败: {e}")
 
@@ -439,203 +384,108 @@ async def alarm_response(request: AlarmResponseRequest):
 
 
 @app.post("/upload/audio")
-async def upload_audio(request: AudioDataRequest):
+async def upload_audio(request: Request):
     """
-    接收音频 base64 数据并保存为文件
+    接收硬件上传的原始 PCM 音频数据。
 
-    请求体示例:
-    ```json
-    {
-        "client_id": "client123",
-        "data": "base64_encoded_audio_data"
-    }
-    ```
+    硬件协议（与 AudioMonitor::UploadAudio 对齐）：
+        HTTP POST，body 为原始 PCM 二进制（application/octet-stream），
+        元数据通过 HTTP header 传递：
+            Client-Id        客户端 ID（必填）
+            Device-Id        设备 MAC 地址（可选）
+            X-Sample-Rate    采样率（Hz，缺省取服务端配置）
+            X-Channels       声道数（必须为 1）
+            X-Bits           采样位深（必须为 16）
     """
+    client_id = ""
     try:
-        if not LABEL_ENTRIES:
-            logger.info(f"labels为空")
-            return {
-                "success": True,
-                "message": "labels为空",
-                "data": {}
-            }
+        client_id = (request.headers.get("Client-Id") or "").strip()
+        if not client_id:
+            logger.warning("音频上传拒绝: Client-Id header 缺失")
+            raise HTTPException(status_code=400, detail="Client-Id header 缺失")
 
-        # 确保 temp 目录存在
-        os.makedirs(TEMP_DIR, exist_ok=True)
+        device_id = (request.headers.get("Device-Id") or "").strip()
 
-        # 解码 base64 数据 (OPUS 编码)
-        try:
-            audio_data = base64.b64decode(request.data)
-            # if(request.format=="opus"):
-            #     opus_decoder = OpusDecoder()
-            #     pcm_data=opus_decoder.decode(audio_data)
-            # else:
-            pcm_data=audio_data
-       
-
-        except Exception as e:
-            logger.error(f"OPUS 解码失败: {str(e)}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"OPUS 解码失败: {str(e)}"
-            )
-
-        # 生成文件名
-        file_id = datetime.now().strftime("%H%M%S")
-        wav_filename = f"{request.client_id}_{file_id}.wav"
-        wav_path = os.path.join(TEMP_DIR, wav_filename)
-
-        # 保存 pcm 文件
-        # 确保数据长度是偶数（16位音频）
-        if len(pcm_data) % 2 != 0:
-            pcm_data = pcm_data[:-1]
-
-        # 降噪处理
-        pcm_data = reduce_noise(pcm_data, SAMPLE_RATE)
-        #logger.info("音频降噪处理完成")
-
-        # 创建WAV文件头
-        wav_buffer = io.BytesIO()
-        success = False
-        results = []  # 初始化，防止未定义
-        try:
-            with wave.open(wav_buffer, "wb") as wav_file:
-                wav_file.setnchannels(1)  # 单声道
-                wav_file.setsampwidth(2)  # 16位
-                wav_file.setframerate(16000)  # 16kHz采样率
-                wav_file.writeframes(pcm_data)
-
-            wav_buffer.seek(0)
-            wav_data = wav_buffer.read()
-            with open(wav_path, "wb") as f:
-                f.write(wav_data)
-            # logger.info(f"音频已保存到: {wav_path}")
-            
-            clsclient_executor = CLSClientExecutor()
-            res = clsclient_executor(
-            input=wav_path,
-            server_ip=DEFAULT_SERVER_IP,
-            port=DEFAULT_PORT,
-            topk=DEFAULT_TOPK
-            )
-            # logger.info(f"音频分类结果: {res.json()}")
-
-            # 处理分类结果
-            res_data = res.json()
-            if res_data.get('success') and res_data.get('result'):
-                results = res_data['result'].get('results', [])
-                logger.info(f"音频分类结果: {results}")
-                matched_classes = []
-                matched_en_classes = []
-
-                for item in results:
-                    prob = item.get('prob', 0)
-                    class_name = item.get('class_name', '')
-                    cn_label = match_chinese_label(class_name, LABEL_ENTRIES)
-                    if prob > SCORE and cn_label:
-                        matched_classes.append(cn_label)
-                        matched_en_classes.append(class_name)
-
-                # 说话声且不在 LABEL_ENTRIES：ASR 识别求救内容
-                need_asr = SPEECH_DETECT_ENABLED and any(
-                    item.get("prob", 0) > SCORE
-                    and is_speech_label(item.get("class_name", ""), SPEECH_LABELS)
-                    and not match_chinese_label(
-                        item.get("class_name", ""), LABEL_ENTRIES
-                    )
-                    for item in results
+        def _parse_int_header(name: str, default: int) -> int:
+            raw = request.headers.get(name)
+            if raw is None or raw == "":
+                return default
+            try:
+                return int(raw)
+            except ValueError:
+                logger.warning(
+                    f"音频上传拒绝: client_id={client_id}, 无效的 {name} header: {raw!r}"
                 )
-                if need_asr:
-                    try:
-                        asr = get_sensevoice_asr(CONFIG)
-                        asr_text = asr.recognize(wav_path)
-                        logger.info(
-                            f"说话声 ASR 结果: client_id={request.client_id}, text={asr_text}"
-                        )
-                        if contains_distress(asr_text, DISTRESS_KEYWORDS):
-                            if DISTRESS_LABEL not in matched_classes:
-                                matched_classes.append(DISTRESS_LABEL)
-                                matched_en_classes.append("Distress")
-                    except Exception as e:
-                        logger.error(f"说话声 ASR 失败，跳过求救检测: {e}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"无效的 {name} header: {raw!r}",
+                )
 
-                if matched_classes:
-                    reminder = "发现异常声音：" + ",".join(matched_classes)
-                    # 检查缓存，5分钟内相同 client_id + text 不重复触发
-                    if not check_and_update_cache(request.client_id, reminder):
-                        logger.info(f"client_id={request.client_id} 跳过重复调用")
-                    elif has_client_pending(request.client_id):
-                        logger.info(f"client_id={request.client_id} 待确认中，跳过")
-                    else:
-                        if "@@@" in request.client_id:
-                            code = request.client_id.split("@@@")[1]
-                        else:
-                            code = request.client_id
-                        if "_" in code:
-                            code = code.replace("_", ":")
+        sample_rate = _parse_int_header("X-Sample-Rate", SAMPLE_RATE)
+        channels = _parse_int_header("X-Channels", 1)
+        bits = _parse_int_header("X-Bits", 16)
 
-                        if ALARM_CONFIRM_CFG.enabled:
-                            sounds_desc = pick_sounds_desc(
-                                matched_classes, matched_en_classes
-                            )
-                            ok, session_id = start_alarm_confirm(
-                                client_id=request.client_id,
-                                mac_code=code,
-                                reminder=reminder,
-                                sounds_desc=sounds_desc,
-                                api_base_url=SERVER_URL.rstrip("/"),
-                                mqtt_base_url=MQTT_BASE_URL,
-                                mqtt_key=MQTT_KEY,
-                                app_server_base_url=APP_SERVER_BASE_URL,
-                                cfg=ALARM_CONFIRM_CFG,
-                            )
-                            logger.info(
-                                f"告警确认流程: ok={ok}, session_id={session_id}"
-                            )
-                        else:
-                            http_client = CommandHttpClient(
-                                base_url=APP_SERVER_BASE_URL, key=""
-                            )
-                            result = http_client.send_alarm(
-                                macAddress=code, reminder=reminder
-                            )
-                            logger.info(f"直接发送告警：{result}")
-            success = True
-        except Exception as e:
-            logger.error(f"WAV转换失败: {e}")
-        
-        # 删除临时文件
-        if os.path.exists(wav_path):
-            os.remove(wav_path)
-            
-        if(success):
-            return {
-                "success": True,
-                "message": "音频文件处理成功",
-                "data": {
-                    "client_id": request.client_id,
-                    "result": results
-                }
-            }
+        pcm_data = await request.body()
+        if not pcm_data:
+            logger.warning(f"音频上传拒绝: client_id={client_id}, 请求体为空")
+            raise HTTPException(status_code=400, detail="请求体为空")
+
+        duration_sec = len(pcm_data) / (sample_rate * channels * (bits // 8))
+        # logger.info(
+        #     f"收到音频上传: client_id={client_id}, device_id={device_id or '-'}, "
+        #     f"pcm={len(pcm_data)} bytes, 约{duration_sec:.2f}s, "
+        #     f"sample_rate={sample_rate}, channels={channels}, bits={bits}"
+        # )
+
+        upload = RawAudioUpload(
+            client_id=client_id,
+            pcm_data=pcm_data,
+            sample_rate=sample_rate,
+            channels=channels,
+            bits=bits,
+            device_id=device_id,
+        )
+
+        result = await asyncio.to_thread(process_upload_audio, upload, UPLOAD_CFG)
+
+        if result.get("success"):
+            data = result.get("data") or {}
+            if data.get("skipped"):
+                logger.info(
+                    f"音频上传已跳过: client_id={client_id}, "
+                    f"reason={data.get('reason', '-')}, message={result.get('message')}"
+                )
+            else:
+                cls_results = data.get("result") or []
+                logger.info(
+                    f"音频上传处理成功: client_id={client_id}, "
+                    f"分类条数={len(cls_results)}, message={result.get('message')}"
+                )
         else:
-            return {
-                "success": False,
-                "message": "音频文件处理失败"
-            }
+            logger.warning(
+                f"音频上传处理失败: client_id={client_id}, message={result.get('message')}"
+            )
 
+        return result
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"音频文件保存失败: {str(e)}")
+        logger.error(
+            f"音频上传异常: client_id={client_id or '-'}, error={e}",
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=500,
             detail=f"音频文件保存失败: {str(e)}"
         )
 
 
-
-
-
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=SERVER_IP, port=SERVER_PORT)
+    _uvicorn_log_level = logging.getLevelName(_resolve_log_level()).lower()
+    uvicorn.run(
+        app,
+        host=SERVER_IP,
+        port=SERVER_PORT,
+        log_level=_uvicorn_log_level,
+    )
